@@ -1,4 +1,5 @@
 import streamlit as st
+import concurrent.futures
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
@@ -7,17 +8,11 @@ from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from htmlTemplates import css, bot_template, user_template
-from langchain_community.llms import HuggingFaceHub
-from langchain_community.llms import Ollama
+import requests
 
-def get_pdf_text(pdf_docs):
-    text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
-    return text
-
+def get_pdf_text(pdf):
+    pdf_reader = PdfReader(pdf)
+    return ''.join([page.extract_text() for page in pdf_reader.pages])
 
 def get_text_chunks(text):
     text_splitter = CharacterTextSplitter(
@@ -26,20 +21,26 @@ def get_text_chunks(text):
         chunk_overlap=200,
         length_function=len
     )
-    chunks = text_splitter.split_text(text)
-    return chunks
-
+    return text_splitter.split_text(text)
 
 def get_vectorstore(text_chunks):
-    # embeddings = OpenAIEmbeddings()
     embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
     vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
     return vectorstore
 
+def get_conversation_chain():
+    API_URL = "https://yq6khpb3y6efw19f.us-east-1.aws.endpoints.huggingface.cloud"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": "Bearer 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", 
+        "Content-Type": "application/json"
+    }
 
-def get_conversation_chain(vectorstore):
-    # llm = ChatOpenAI()
-    llm = Ollama(model='llama3:latest')
+    def call_my_api(prompt):
+        response = requests.post(API_URL, json={'inputs': prompt}, headers=headers)
+        return response.json()
+
+    llm = call_my_api
 
     memory = ConversationBufferMemory(
         memory_key='chat_history', return_messages=True)
@@ -49,7 +50,6 @@ def get_conversation_chain(vectorstore):
         memory=memory
     )
     return conversation_chain
-
 
 def handle_userinput(user_question):
     response = st.session_state.conversation({'question': user_question})
@@ -63,7 +63,6 @@ def handle_userinput(user_question):
             st.write(bot_template.replace(
                 "{{MSG}}", message.content), unsafe_allow_html=True)
 
-
 def main():
     load_dotenv()
     st.set_page_config(page_title="Chat with multiple PDFs",
@@ -71,7 +70,7 @@ def main():
     st.write(css, unsafe_allow_html=True)
 
     if "conversation" not in st.session_state:
-        st.session_state.conversation = None
+        st.session_state.conversation = get_conversation_chain()
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = None
 
@@ -87,18 +86,17 @@ def main():
         if st.button("Process"):
             with st.spinner("Processing"):
                 # get pdf text
-                raw_text = get_pdf_text(pdf_docs)
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    pdf_texts = executor.map(get_pdf_text, pdf_docs)
 
                 # get the text chunks
-                text_chunks = get_text_chunks(raw_text)
+                text_chunks = [chunk for text in pdf_texts for chunk in get_text_chunks(text)]
 
                 # create vector store
                 vectorstore = get_vectorstore(text_chunks)
 
                 # create conversation chain
-                st.session_state.conversation = get_conversation_chain(
-                    vectorstore)
-
+                st.session_state.conversation = get_conversation_chain()
 
 if __name__ == '__main__':
     main()
